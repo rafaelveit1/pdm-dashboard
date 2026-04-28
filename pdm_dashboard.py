@@ -39,85 +39,107 @@ def train_model(df):
     model.fit(X_train, y_train)
     return model, feature_cols
 
-with st.spinner("Loading fleet data..."):
-    df = load_data()
-    model, feature_cols = train_model(df)
-
-# ── Build fleet summary ───────────────────────────────────────────────────────
-@st.cache_data
-def build_fleet(_df, _model, _feature_cols):
+def build_fleet(_df, _model, _feature_cols, check_cycle):
     fleet = []
     for eid in sorted(_df['unit_id'].unique()):
         edf = _df[_df['unit_id'] == eid]
-        last_row = edf[edf['cycle'] == edf['cycle'].max()][_feature_cols]
-        rul = int(_model.predict(last_row)[0])
-        if rul <= 10:
-            status = "🔴 CRITICAL"
-            health = min(15, rul * 1.5)
-        elif rul <= 30:
-            status = "🟡 WARNING"
-            health = 15 + (rul - 10) * 1.5
+        max_cyc = int(edf['cycle'].max())
+        if check_cycle > max_cyc:
+            status = "💀 FAILED"
+            rul = 0
+            health = 0
         else:
-            status = "🟢 HEALTHY"
-            health = min(100, 45 + rul * 0.44)
+            closest = edf.iloc[(edf['cycle'] - check_cycle).abs().argsort()[:1]]
+            rul = int(_model.predict(closest[_feature_cols])[0])
+            if rul <= 10:
+                status = "🔴 CRITICAL"
+                health = min(15, rul * 1.5)
+            elif rul <= 30:
+                status = "🟡 WARNING"
+                health = 15 + (rul - 10) * 1.5
+            else:
+                status = "🟢 HEALTHY"
+                health = min(100, 45 + rul * 0.44)
         fleet.append({
             "unit_id": eid,
-            "max_cycle": int(edf['cycle'].max()),
+            "max_cycle": max_cyc,
             "rul": rul,
             "status": status,
             "health": round(health)
         })
     return pd.DataFrame(fleet)
 
-fleet_df = build_fleet(df, model, feature_cols)
+# ── Load ──────────────────────────────────────────────────────────────────────
+with st.spinner("Loading fleet data..."):
+    df = load_data()
+    model, feature_cols = train_model(df)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🏭 Fleet Health Monitor")
 st.markdown("Real-time predictive maintenance dashboard — powered by ML")
 st.divider()
 
+# ── SLIDER — must come before fleet is built ──────────────────────────────────
+check_cycle = st.slider(
+    "📅 Fleet-wide flight cycle — drag to see how the fleet health changes over time",
+    min_value=1,
+    max_value=300,
+    value=100,
+    step=1,
+    help="Simulates all engines being built and deployed at the same time"
+)
+
+st.divider()
+
+# ── Build fleet at selected cycle ─────────────────────────────────────────────
+fleet_df = build_fleet(df, model, feature_cols, check_cycle)
+
 # ── Fleet KPIs ────────────────────────────────────────────────────────────────
 critical = len(fleet_df[fleet_df['status'] == "🔴 CRITICAL"])
 warning  = len(fleet_df[fleet_df['status'] == "🟡 WARNING"])
 healthy  = len(fleet_df[fleet_df['status'] == "🟢 HEALTHY"])
-avg_rul  = int(fleet_df['rul'].mean())
+failed   = len(fleet_df[fleet_df['status'] == "💀 FAILED"])
+avg_rul  = int(fleet_df[fleet_df['rul'] > 0]['rul'].mean()) if len(fleet_df[fleet_df['rul'] > 0]) > 0 else 0
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("🔴 Critical", critical, help="Engines needing immediate attention")
-k2.metric("🟡 Warning",  warning,  help="Engines to schedule maintenance")
-k3.metric("🟢 Healthy",  healthy,  help="Engines operating normally")
-k4.metric("⏱ Avg RUL",  f"{avg_rul} flights", help="Average remaining useful life across fleet")
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("🔴 Critical", critical)
+k2.metric("🟡 Warning",  warning)
+k3.metric("🟢 Healthy",  healthy)
+k4.metric("💀 Failed",   failed)
+k5.metric("⏱ Avg RUL",  f"{avg_rul} flights")
 
 st.divider()
 
-# ── Traffic light fleet overview ──────────────────────────────────────────────
-st.subheader("Fleet Overview")
-st.caption("Click on an engine below to see full details")
+# ── Traffic light tabs ────────────────────────────────────────────────────────
+st.subheader(f"Fleet Overview at Cycle {check_cycle}")
 
-tab1, tab2, tab3 = st.tabs(["🔴 Critical", "🟡 Warning", "🟢 Healthy"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔴 Critical", "🟡 Warning", "🟢 Healthy", "💀 Failed"])
+
+def render_table(subset, label):
+    t = subset[['unit_id', 'rul', 'health', 'max_cycle']].copy()
+    t.columns = ['Engine', 'Flights Remaining', 'Health Score %', 'Total Cycles']
+    t['Engine'] = t['Engine'].apply(lambda x: f"Engine #{x}")
+    st.dataframe(t, use_container_width=True, hide_index=True)
 
 with tab1:
-    crit_df = fleet_df[fleet_df['status'] == "🔴 CRITICAL"][['unit_id', 'rul', 'health', 'max_cycle']].copy()
-    crit_df.columns = ['Engine', 'Flights Remaining', 'Health Score %', 'Total Cycles']
-    crit_df['Engine'] = crit_df['Engine'].apply(lambda x: f"Engine #{x}")
-    st.dataframe(crit_df, use_container_width=True, hide_index=True)
+    render_table(fleet_df[fleet_df['status'] == "🔴 CRITICAL"], "critical")
     if critical > 0:
-        st.error(f"⚠️ {critical} engines require immediate maintenance scheduling.")
+        st.error(f"🚨 {critical} engines require immediate maintenance.")
 
 with tab2:
-    warn_df = fleet_df[fleet_df['status'] == "🟡 WARNING"][['unit_id', 'rul', 'health', 'max_cycle']].copy()
-    warn_df.columns = ['Engine', 'Flights Remaining', 'Health Score %', 'Total Cycles']
-    warn_df['Engine'] = warn_df['Engine'].apply(lambda x: f"Engine #{x}")
-    st.dataframe(warn_df, use_container_width=True, hide_index=True)
+    render_table(fleet_df[fleet_df['status'] == "🟡 WARNING"], "warning")
     if warning > 0:
-        st.warning(f"🔧 {warning} engines should be scheduled for maintenance within the next 30 flights.")
+        st.warning(f"🔧 {warning} engines should be scheduled within the next 30 flights.")
 
 with tab3:
-    heal_df = fleet_df[fleet_df['status'] == "🟢 HEALTHY"][['unit_id', 'rul', 'health', 'max_cycle']].copy()
-    heal_df.columns = ['Engine', 'Flights Remaining', 'Health Score %', 'Total Cycles']
-    heal_df['Engine'] = heal_df['Engine'].apply(lambda x: f"Engine #{x}")
-    st.dataframe(heal_df, use_container_width=True, hide_index=True)
-    st.success(f"✅ {healthy} engines are operating normally. No action required.")
+    render_table(fleet_df[fleet_df['status'] == "🟢 HEALTHY"], "healthy")
+    if healthy > 0:
+        st.success(f"✅ {healthy} engines operating normally. No action required.")
+
+with tab4:
+    render_table(fleet_df[fleet_df['status'] == "💀 FAILED"], "failed")
+    if failed > 0:
+        st.error(f"💀 {failed} engines have exceeded their maximum cycle and failed.")
 
 st.divider()
 
@@ -130,10 +152,9 @@ engine_id = st.selectbox(
     format_func=lambda x: f"Engine #{x}  —  {fleet_df[fleet_df['unit_id']==x]['status'].values[0]}"
 )
 
-engine_data  = df[df['unit_id'] == engine_id]
-engine_info  = fleet_df[fleet_df['unit_id'] == engine_id].iloc[0]
+engine_data = df[df['unit_id'] == engine_id]
+engine_info = fleet_df[fleet_df['unit_id'] == engine_id].iloc[0]
 
-# Health bar
 health_score = engine_info['health']
 rul          = engine_info['rul']
 status       = engine_info['status']
@@ -143,27 +164,27 @@ d1.metric("Status", status)
 d2.metric("Flights Remaining", f"{rul} flights")
 d3.metric("Health Score", f"{health_score}%")
 
-# Colour coded recommendation
-if rul <= 10:
-    st.error(f"🚨 IMMEDIATE ACTION REQUIRED — Schedule maintenance for Engine #{engine_id} within the next {rul} flights.")
+if status == "💀 FAILED":
+    st.error(f"💀 Engine #{engine_id} has already failed at cycle {engine_info['max_cycle']}. Current cycle {check_cycle} is {check_cycle - engine_info['max_cycle']} cycles past failure.")
+elif rul <= 10:
+    st.error(f"🚨 IMMEDIATE ACTION REQUIRED — Engine #{engine_id} has only {rul} flights remaining.")
 elif rul <= 30:
-    st.warning(f"⚠️ PLAN AHEAD — Engine #{engine_id} has {rul} flights remaining. Schedule maintenance within 2 weeks.")
+    st.warning(f"⚠️ PLAN AHEAD — Engine #{engine_id} has {rul} flights remaining. Schedule maintenance soon.")
 else:
-    st.success(f"✅ NO ACTION NEEDED — Engine #{engine_id} has {rul} flights remaining. Next check at cycle {engine_data['cycle'].max() + 20}.")
+    st.success(f"✅ NO ACTION NEEDED — Engine #{engine_id} has {rul} flights remaining.")
 
-# Sensor selector
+# ── Sensor chart ──────────────────────────────────────────────────────────────
 sensor_options = ['s2', 's3', 's4', 's7', 's11', 's14', 's15']
 selected_sensor = st.selectbox("View sensor degradation", sensor_options, index=5)
 
-# Degradation chart
 fig, ax = plt.subplots(figsize=(12, 4))
 ax.plot(engine_data['cycle'], engine_data[selected_sensor],
         color='royalblue', linewidth=1.5, label=f'Sensor {selected_sensor}')
-ax.plot(engine_data['cycle'],
-        engine_data[f'{selected_sensor}_rolling_mean'],
+ax.plot(engine_data['cycle'], engine_data[f'{selected_sensor}_rolling_mean'],
         color='orange', linewidth=2, linestyle='--', label='Rolling average (trend)')
-ax.axvline(x=engine_data['cycle'].max(), color='red',
-           linestyle='--', linewidth=1.5, label=f'Failure point ({engine_data["cycle"].max()})')
+ax.axvline(x=check_cycle, color='green', linestyle='--', linewidth=2, label=f'Current cycle ({check_cycle})')
+ax.axvline(x=engine_data['cycle'].max(), color='red', linestyle='--', linewidth=1.5,
+           label=f'Failure point ({engine_data["cycle"].max()})')
 ax.set_xlabel('Flight Cycle')
 ax.set_ylabel(f'Sensor {selected_sensor} Reading')
 ax.set_title(f'Engine #{engine_id} — Sensor {selected_sensor} Degradation Trend')
