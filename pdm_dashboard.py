@@ -11,7 +11,7 @@ st.set_page_config(page_title="PdM Dashboard", page_icon="⚙️", layout="wide"
 def load_data():
     col_names = ['unit_id', 'cycle', 'op1', 'op2', 'op3'] + [f's{i}' for i in range(1, 22)]
     df = pd.read_csv(
-        '/Users/rafaelveit/Desktop/CMaps/train_FD001.txt',
+        'train_FD001.txt',
         sep=' ', header=None, names=col_names, index_col=False
     )
     df = df.dropna(axis=1)
